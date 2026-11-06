@@ -105,8 +105,10 @@ Environment variables override the properties for a single run or in CI:
   runs the x86_64 build through emulation. On Linux, the official apm binary needs a
   reasonably recent glibc.
 - **Requirements:** `curl`, `tar` and `sha256sum` or `shasum` on Linux and macOS; Windows
-  PowerShell 5.1 (included with Windows 10 and 11) on Windows. In Git Bash on Windows, use
-  `apmw.cmd`.
+  PowerShell 5.1 (included with Windows 10 and 11) on Windows.
+- **Git Bash:** `./apmw` also works in Git Bash, MSYS2 and Cygwin on Windows. It uses the
+  same cache as `apmw.cmd` (`%LOCALAPPDATA%\apmw`), so apm is downloaded only once per
+  machine.
 
 ## Test status
 

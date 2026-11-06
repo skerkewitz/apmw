@@ -15,7 +15,8 @@
 #   ./apmw --apmw-upgrade [VERSION]     update the apmw scripts (default: latest)
 #
 # Environment overrides (take precedence over apmw.properties):
-#   APMW_HOME                  cache directory (default: ~/.apmw)
+#   APMW_HOME                  cache directory (default: ~/.apmw;
+#                              Git Bash: %LOCALAPPDATA%\apmw, shared with apmw.cmd)
 #   APMW_APM_VERSION           apm version to run
 #   APMW_APM_RELEASES_URL      where apm releases are downloaded from
 #   APMW_WRAPPER_RELEASES_URL  where apmw releases are downloaded from
@@ -96,8 +97,24 @@ set_props() {
         || { rm -f "$PROPS_FILE.tmp.$$"; die "cannot write $PROPS_FILE"; }
 }
 
+case $(uname -s) in
+    MINGW* | MSYS* | CYGWIN*) IS_WINDOWS=1 ;; # Git Bash, MSYS2, Cygwin
+    *) IS_WINDOWS= ;;
+esac
+
 load_settings() {
-    APMW_HOME=${APMW_HOME:-$HOME/.apmw}
+    if [ -n "$IS_WINDOWS" ]; then
+        # Share the cache with apmw.cmd (%LOCALAPPDATA%\apmw); accept Windows paths.
+        if [ -n "${APMW_HOME-}" ]; then
+            APMW_HOME=$(cygpath -u "$APMW_HOME")
+        elif [ -n "${LOCALAPPDATA-}" ]; then
+            APMW_HOME=$(cygpath -u "$LOCALAPPDATA")/apmw
+        else
+            APMW_HOME=$HOME/.apmw
+        fi
+    else
+        APMW_HOME=${APMW_HOME:-$HOME/.apmw}
+    fi
     PINNED_VERSION=$(prop apmVersion)
     APM_VERSION=${APMW_APM_VERSION:-$PINNED_VERSION}
     APM_RELEASES_URL=${APMW_APM_RELEASES_URL:-$(prop apmReleasesUrl "$DEFAULT_APM_RELEASES_URL")}
@@ -109,10 +126,14 @@ load_settings() {
 # --- helpers --------------------------------------------------------------------
 
 detect_platform() {
+    if [ -n "$IS_WINDOWS" ]; then
+        # apm only ships an x86_64 build for Windows; Windows on ARM runs it emulated.
+        PLATFORM=windows-x86_64
+        return
+    fi
     case $(uname -s) in
         Linux) _os=linux ;;
         Darwin) _os=darwin ;;
-        MINGW* | MSYS* | CYGWIN*) die "on Windows use apmw.cmd (e.g. 'cmd //c apmw.cmd ...' from Git Bash)" ;;
         *) die "unsupported operating system: $(uname -s)" ;;
     esac
     case $(uname -m) in
@@ -181,13 +202,36 @@ ensure_apm() {
     detect_platform
     APM_DIR=$APMW_HOME/dists/$APM_VERSION/$PLATFORM
     APM_EXE=$APM_DIR/apm
+    [ -n "$IS_WINDOWS" ] && APM_EXE=$APM_EXE.exe
     [ -x "$APM_EXE" ] || install_apm
+}
+
+# extract ARCHIVE DIR
+extract() {
+    case $1 in
+        *.zip)
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -q -o "$1" -d "$2"
+            elif [ -n "${SYSTEMROOT-}" ] && [ -x "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" ]; then
+                # Windows 10+ ships a bsdtar that can read zip files.
+                "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -xf "$(cygpath -w "$1")" -C "$(cygpath -w "$2")"
+            else
+                die "'unzip' is required but not installed"
+            fi
+            ;;
+        *)
+            need tar
+            tar -xzf "$1" -C "$2"
+            ;;
+    esac
 }
 
 install_apm() {
     need curl
-    need tar
-    _asset=apm-$PLATFORM.tar.gz
+    case $PLATFORM in
+        windows-*) _asset=apm-$PLATFORM.zip ;;
+        *) _asset=apm-$PLATFORM.tar.gz ;;
+    esac
     _url=$APM_RELEASES_URL/download/$APM_VERSION/$_asset
     make_tmp "$APMW_HOME/dists/$APM_VERSION"
 
@@ -208,11 +252,12 @@ install_apm() {
     [ "$_actual" = "$_expected" ] \
         || die "checksum mismatch for $_asset (expected $_expected, got $_actual)"
 
-    tar -xzf "$TMP_DIR/$_asset" -C "$TMP_DIR" || die "could not extract $_asset"
+    extract "$TMP_DIR/$_asset" "$TMP_DIR" || die "could not extract $_asset"
     _staged=$TMP_DIR/apm-$PLATFORM
-    [ -x "$_staged/apm" ] || die "$_asset does not contain apm-$PLATFORM/apm"
+    _staged_exe=$_staged/${APM_EXE##*/}
+    [ -x "$_staged_exe" ] || die "$_asset does not contain apm-$PLATFORM/${APM_EXE##*/}"
 
-    if ! _out=$("$_staged/apm" --version 2>&1); then
+    if ! _out=$("$_staged_exe" --version 2>&1); then
         printf '%s\n' "$_out" >&2
         if [ "${PLATFORM%%-*}" = linux ]; then
             die "the downloaded apm does not run on this system; a too old glibc is the usual cause ($(ldd --version 2>&1 | head -n 1))"
