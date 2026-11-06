@@ -32,7 +32,14 @@ Invoke-WebRequest https://github.com/skerkewitz/apmw/releases/latest/download/ap
 ```
 
 `--apmw-upgrade` downloads both scripts and creates `apm/wrapper/apmw.properties` with
-the latest apm version and its checksums pinned. Commit these files:
+the latest apm version and its checksums pinned.
+
+You can also skip that step and run any apm command right away, e.g. `./apmw install`.
+If no apm version is pinned yet, apmw pins the latest release in
+`apm/wrapper/apmw.properties` first. That only gives you the script you started with, so
+run `--apmw-upgrade` once to get the other one.
+
+Commit these files:
 
 ```
 apmw

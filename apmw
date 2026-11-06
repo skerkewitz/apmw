@@ -198,7 +198,13 @@ make_tmp() { # PARENT
 # --- install apm into the cache ---------------------------------------------------
 
 ensure_apm() {
-    [ -n "$APM_VERSION" ] || die "no apm version configured; run './apmw --apmw-upgrade-apm' to pin one in $PROPS_FILE"
+    if [ -z "$APM_VERSION" ]; then
+        # Like a fresh gradle wrapper: nothing pinned yet, so pin the latest release.
+        info "no apm version pinned yet, pinning the latest release"
+        upgrade_apm ""
+        PINNED_VERSION=$(prop apmVersion)
+        APM_VERSION=$PINNED_VERSION
+    fi
     detect_platform
     APM_DIR=$APMW_HOME/dists/$APM_VERSION/$PLATFORM
     APM_EXE=$APM_DIR/apm

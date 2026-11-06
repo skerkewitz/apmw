@@ -17,7 +17,27 @@ set APMW_PS=powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$s=[IO.F
 set "APMW_ACTION=%~1"
 if /i "%APMW_ACTION:~0,7%"=="--apmw-" goto :wrapper_command
 
+if /i "%~1"=="self-update" (
+    echo apmw: error: apm is managed by apmw; use "apmw --apmw-upgrade-apm [VERSION]" to change the pinned version 1>&2
+    exit /b 1
+)
+
 rem Fast path: run the pinned apm from the cache without starting PowerShell.
+call :resolve_exe
+if defined APMW_VER if exist "%APMW_EXE%" goto :run_apm
+
+rem Slow path: PowerShell pins the latest apm if none is pinned yet, then installs it.
+set "APMW_ACTION=--apmw-ensure"
+%APMW_PS%
+if errorlevel 1 exit /b 1
+call :resolve_exe
+if not exist "%APMW_EXE%" exit /b 1
+
+:run_apm
+"%APMW_EXE%" %*
+exit /b %ERRORLEVEL%
+
+:resolve_exe
 set "APMW_VER=%APMW_APM_VERSION%"
 if not defined APMW_VER if exist "%APMW_PROPS%" (
     for /f "usebackq eol=# tokens=1,* delims==" %%a in ("%APMW_PROPS%") do (
@@ -26,22 +46,7 @@ if not defined APMW_VER if exist "%APMW_PROPS%" (
 )
 if defined APMW_HOME (set "APMW_DIR=%APMW_HOME%") else set "APMW_DIR=%LOCALAPPDATA%\apmw"
 set "APMW_EXE=%APMW_DIR%\dists\%APMW_VER%\windows-x86_64\apm.exe"
-
-if /i "%~1"=="self-update" (
-    echo apmw: error: apm is managed by apmw; use "apmw --apmw-upgrade-apm [VERSION]" to change the pinned version 1>&2
-    exit /b 1
-)
-
-if defined APMW_VER if exist "%APMW_EXE%" goto :run_apm
-
-set "APMW_ACTION=--apmw-ensure"
-%APMW_PS%
-if errorlevel 1 exit /b 1
-if not exist "%APMW_EXE%" exit /b 1
-
-:run_apm
-"%APMW_EXE%" %*
-exit /b %ERRORLEVEL%
+exit /b 0
 
 :wrapper_command
 rem Kept on one line: --apmw-upgrade replaces this file while it runs, and cmd
@@ -156,7 +161,14 @@ function Remove-Dir([string]$d) {
 }
 
 function Install-Apm {
-    if (-not $ApmVersion) { Fail "no apm version configured; run 'apmw --apmw-upgrade-apm' to pin one in $PropsFile" }
+    if (-not $ApmVersion) {
+        # Like a fresh gradle wrapper: nothing pinned yet, so pin the latest release.
+        Info "no apm version pinned yet, pinning the latest release"
+        Upgrade-Apm ''
+        $Props = Read-Props
+        $PinnedVersion = $Props['apmVersion']
+        $ApmVersion = $PinnedVersion
+    }
     $verDir = Join-Path $ApmwHome "dists\$ApmVersion"
     $apmDir = Join-Path $verDir $Platform
     if (Test-Path -LiteralPath (Join-Path $apmDir 'apm.exe')) { return }
