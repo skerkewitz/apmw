@@ -1,0 +1,5 @@
+# apmw must keep LF (sh), apmw.cmd must keep CRLF (cmd), whatever core.autocrlf says.
+apmw          text eol=lf
+*.cmd         text eol=crlf
+*.properties  text eol=lf
+*.sh          text eol=lf

@@ -1,0 +1,324 @@
+#!/bin/sh
+#
+# apmw - wrapper for Microsoft APM (Agent Package Manager), in the spirit of gradlew.
+# https://github.com/skerkewitz/apmw
+#
+# Commit apmw, apmw.cmd and apm/wrapper/apmw.properties to your project and
+# use ./apmw wherever you would use apm. The apm version pinned in
+# apmw.properties is downloaded once into a per-user cache (~/.apmw) and
+# every call is forwarded to it.
+#
+# Wrapper commands (all others go to apm):
+#   ./apmw --apmw-help                  show this help
+#   ./apmw --apmw-version               show wrapper and apm versions
+#   ./apmw --apmw-upgrade-apm [VERSION] pin another apm version (default: latest)
+#   ./apmw --apmw-upgrade [VERSION]     update the apmw scripts (default: latest)
+#
+# Environment overrides (take precedence over apmw.properties):
+#   APMW_HOME                  cache directory (default: ~/.apmw)
+#   APMW_APM_VERSION           apm version to run
+#   APMW_APM_RELEASES_URL      where apm releases are downloaded from
+#   APMW_WRAPPER_RELEASES_URL  where apmw releases are downloaded from
+
+# shellcheck disable=SC2015 # "a && b || die" is intended: die if either step fails
+set -u
+
+DEFAULT_APM_RELEASES_URL=https://github.com/microsoft/apm/releases
+DEFAULT_WRAPPER_RELEASES_URL=https://github.com/skerkewitz/apmw/releases
+ALL_PLATFORMS="linux-x86_64 linux-arm64 darwin-x86_64 darwin-arm64 windows-x86_64"
+
+die() { printf 'apmw: error: %s\n' "$*" >&2; exit 1; }
+info() { printf 'apmw: %s\n' "$*" >&2; }
+
+# --- locate the project (directory of this script, following symlinks) ------
+
+app_path=$0
+while [ -h "$app_path" ]; do
+    ls=$(ls -ld "$app_path")
+    link=${ls#*' -> '}
+    case $link in
+        /*) app_path=$link ;;
+        *) app_path=${app_path%/*}/$link ;;
+    esac
+done
+case $app_path in
+    */*) app_dir=${app_path%/*} ;;
+    *) app_dir=. ;;
+esac
+APP_HOME=$(cd "$app_dir" >/dev/null 2>&1 && pwd -P) || die "cannot find the apmw directory"
+PROPS_FILE=$APP_HOME/apm/wrapper/apmw.properties
+
+# --- properties ---------------------------------------------------------------
+
+# prop KEY [DEFAULT] - value of KEY in apmw.properties (last one wins)
+prop() {
+    _v=
+    if [ -f "$PROPS_FILE" ]; then
+        _v=$(awk -v k="$1" '
+            { sub(/\r$/, "") }
+            /^[ \t]*[#!]/ { next }
+            {
+                i = index($0, "="); if (i == 0) next
+                key = substr($0, 1, i - 1); val = substr($0, i + 1)
+                gsub(/^[ \t]+|[ \t]+$/, "", key); gsub(/^[ \t]+|[ \t]+$/, "", val)
+                if (key == k) v = val
+            }
+            END { print v }' "$PROPS_FILE")
+    fi
+    if [ -n "$_v" ]; then printf '%s' "$_v"; else printf '%s' "${2-}"; fi
+}
+
+# set_props "key=value<newline>key=value..." - update or append keys, keep the rest
+set_props() {
+    mkdir -p "${PROPS_FILE%/*}" || die "cannot create ${PROPS_FILE%/*}"
+    [ -f "$PROPS_FILE" ] || : > "$PROPS_FILE" || die "cannot create $PROPS_FILE"
+    awk -v kv="$1" '
+        BEGIN {
+            n = split(kv, a, "\n")
+            for (i = 1; i <= n; i++) {
+                j = index(a[i], "="); if (j == 0) continue
+                k = substr(a[i], 1, j - 1); val[k] = substr(a[i], j + 1); order[++m] = k
+            }
+        }
+        {
+            line = $0; sub(/\r$/, "", line)
+            if (line !~ /^[ \t]*[#!]/ && (j = index(line, "=")) > 0) {
+                key = substr(line, 1, j - 1); gsub(/^[ \t]+|[ \t]+$/, "", key)
+                if (key in val) {
+                    if (!(key in done)) print key "=" val[key]
+                    done[key] = 1; next
+                }
+            }
+            print line
+        }
+        END { for (i = 1; i <= m; i++) if (!(order[i] in done)) print order[i] "=" val[order[i]] }
+    ' "$PROPS_FILE" > "$PROPS_FILE.tmp.$$" && mv "$PROPS_FILE.tmp.$$" "$PROPS_FILE" \
+        || { rm -f "$PROPS_FILE.tmp.$$"; die "cannot write $PROPS_FILE"; }
+}
+
+load_settings() {
+    APMW_HOME=${APMW_HOME:-$HOME/.apmw}
+    PINNED_VERSION=$(prop apmVersion)
+    APM_VERSION=${APMW_APM_VERSION:-$PINNED_VERSION}
+    APM_RELEASES_URL=${APMW_APM_RELEASES_URL:-$(prop apmReleasesUrl "$DEFAULT_APM_RELEASES_URL")}
+    WRAPPER_RELEASES_URL=${APMW_WRAPPER_RELEASES_URL:-$(prop wrapperReleasesUrl "$DEFAULT_WRAPPER_RELEASES_URL")}
+    APM_RELEASES_URL=${APM_RELEASES_URL%/}
+    WRAPPER_RELEASES_URL=${WRAPPER_RELEASES_URL%/}
+}
+
+# --- helpers --------------------------------------------------------------------
+
+detect_platform() {
+    case $(uname -s) in
+        Linux) _os=linux ;;
+        Darwin) _os=darwin ;;
+        MINGW* | MSYS* | CYGWIN*) die "on Windows use apmw.cmd (e.g. 'cmd //c apmw.cmd ...' from Git Bash)" ;;
+        *) die "unsupported operating system: $(uname -s)" ;;
+    esac
+    case $(uname -m) in
+        x86_64 | amd64) _arch=x86_64 ;;
+        arm64 | aarch64) _arch=arm64 ;;
+        *) die "unsupported architecture: $(uname -m)" ;;
+    esac
+    PLATFORM=$_os-$_arch
+}
+
+need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed"; }
+
+download() { # URL DEST
+    curl -fsSL --retry 2 --connect-timeout 20 -o "$2" "$1"
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{ print $1 }'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{ print $1 }'
+    else
+        die "'sha256sum' or 'shasum' is required but not installed"
+    fi
+}
+
+lower() { printf '%s' "$1" | tr 'A-F' 'a-f'; }
+
+is_sha256() {
+    case $1 in
+        *[!0-9a-f]* | '') return 1 ;;
+    esac
+    [ ${#1} -eq 64 ]
+}
+
+# normalize_version 0.35.0 -> v0.35.0 (release tags carry a leading v)
+normalize_version() {
+    case $1 in
+        [0-9]*) printf 'v%s' "$1" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# latest_tag RELEASES_URL - tag name that RELEASES_URL/latest redirects to
+latest_tag() {
+    _url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$1/latest" 2>/dev/null) || return 1
+    case $_url in
+        */releases/tag/*) printf '%s' "${_url##*/}" ;;
+        *) return 1 ;;
+    esac
+}
+
+TMP_DIR=
+cleanup() { [ -n "$TMP_DIR" ] && rm -rf "$TMP_DIR"; TMP_DIR=; }
+make_tmp() { # PARENT
+    mkdir -p "$1" || die "cannot create $1"
+    TMP_DIR=$(mktemp -d "$1/.apmw-tmp.XXXXXX") || die "cannot create a temporary directory in $1"
+    trap cleanup EXIT
+    trap 'cleanup; exit 130' INT TERM
+}
+
+# --- install apm into the cache ---------------------------------------------------
+
+ensure_apm() {
+    [ -n "$APM_VERSION" ] || die "no apm version configured; run './apmw --apmw-upgrade-apm' to pin one in $PROPS_FILE"
+    detect_platform
+    APM_DIR=$APMW_HOME/dists/$APM_VERSION/$PLATFORM
+    APM_EXE=$APM_DIR/apm
+    [ -x "$APM_EXE" ] || install_apm
+}
+
+install_apm() {
+    need curl
+    need tar
+    _asset=apm-$PLATFORM.tar.gz
+    _url=$APM_RELEASES_URL/download/$APM_VERSION/$_asset
+    make_tmp "$APMW_HOME/dists/$APM_VERSION"
+
+    info "downloading apm $APM_VERSION for $PLATFORM ..."
+    download "$_url" "$TMP_DIR/$_asset" \
+        || die "could not download $_url (offline? apm $APM_VERSION is not in the cache yet)"
+
+    _expected=
+    if [ "$APM_VERSION" = "$PINNED_VERSION" ]; then
+        _expected=$(lower "$(prop "apmSha256.$PLATFORM")")
+    fi
+    if [ -z "$_expected" ]; then
+        info "warning: no apmSha256.$PLATFORM for $APM_VERSION in apmw.properties, using the published checksum"
+        download "$_url.sha256" "$TMP_DIR/$_asset.sha256" || die "could not download $_url.sha256"
+        _expected=$(lower "$(awk '{ print $1; exit }' "$TMP_DIR/$_asset.sha256")")
+    fi
+    _actual=$(sha256_of "$TMP_DIR/$_asset")
+    [ "$_actual" = "$_expected" ] \
+        || die "checksum mismatch for $_asset (expected $_expected, got $_actual)"
+
+    tar -xzf "$TMP_DIR/$_asset" -C "$TMP_DIR" || die "could not extract $_asset"
+    _staged=$TMP_DIR/apm-$PLATFORM
+    [ -x "$_staged/apm" ] || die "$_asset does not contain apm-$PLATFORM/apm"
+
+    if ! _out=$("$_staged/apm" --version 2>&1); then
+        printf '%s\n' "$_out" >&2
+        if [ "${PLATFORM%%-*}" = linux ]; then
+            die "the downloaded apm does not run on this system; a too old glibc is the usual cause ($(ldd --version 2>&1 | head -n 1))"
+        fi
+        die "the downloaded apm does not run on this system"
+    fi
+
+    # Another apmw may have finished the same install meanwhile; keep theirs.
+    if [ ! -d "$APM_DIR" ]; then
+        mv "$_staged" "$APM_DIR" || [ -x "$APM_EXE" ] || die "cannot move apm to $APM_DIR"
+    fi
+    cleanup
+    info "installed apm $APM_VERSION in $APM_DIR"
+}
+
+# --- wrapper commands -------------------------------------------------------------------
+
+upgrade_apm() { # [VERSION]
+    need curl
+    if [ -n "${1-}" ]; then
+        _ver=$(normalize_version "$1")
+    else
+        _ver=$(latest_tag "$APM_RELEASES_URL") \
+            || die "cannot determine the latest apm release from $APM_RELEASES_URL/latest; pass a version"
+    fi
+    make_tmp "$APMW_HOME"
+    info "fetching checksums for apm $_ver ..."
+    _kv="apmVersion=$_ver"
+    for _p in $ALL_PLATFORMS; do
+        case $_p in windows-*) _asset=apm-$_p.zip ;; *) _asset=apm-$_p.tar.gz ;; esac
+        _url=$APM_RELEASES_URL/download/$_ver/$_asset.sha256
+        download "$_url" "$TMP_DIR/sum" || die "could not download $_url (does apm $_ver exist?)"
+        _h=$(lower "$(awk '{ print $1; exit }' "$TMP_DIR/sum")")
+        is_sha256 "$_h" || die "$_url does not contain a sha256 checksum"
+        _kv="$_kv
+apmSha256.$_p=$_h"
+    done
+    cleanup
+    set_props "$_kv"
+    if [ "$_ver" = "$PINNED_VERSION" ]; then
+        info "apm $_ver was already pinned; checksums refreshed"
+    else
+        info "pinned apm $_ver (was: ${PINNED_VERSION:-none}) in apm/wrapper/apmw.properties - review and commit it"
+    fi
+}
+
+upgrade_wrapper() { # [VERSION]
+    need curl
+    if [ -n "${1-}" ]; then
+        _ver=$(normalize_version "$1")
+    else
+        _ver=$(latest_tag "$WRAPPER_RELEASES_URL") \
+            || die "cannot determine the latest apmw release from $WRAPPER_RELEASES_URL/latest; pass a version"
+    fi
+    make_tmp "$APP_HOME"
+    info "downloading apmw $_ver ..."
+    for _f in apmw apmw.cmd apmw.sha256; do
+        download "$WRAPPER_RELEASES_URL/download/$_ver/$_f" "$TMP_DIR/$_f" \
+            || die "could not download $WRAPPER_RELEASES_URL/download/$_ver/$_f"
+    done
+    for _f in apmw apmw.cmd; do
+        _expected=$(lower "$(awk -v f="$_f" '$2 == f || $2 == "*" f { print $1; exit }' "$TMP_DIR/apmw.sha256")")
+        [ "$(sha256_of "$TMP_DIR/$_f")" = "$_expected" ] || die "checksum mismatch for $_f in apmw $_ver"
+    done
+    head -n 1 "$TMP_DIR/apmw" | grep -q '^#!' || die "downloaded apmw does not look like a script"
+    chmod +x "$TMP_DIR/apmw"
+    # mv replaces the files atomically; this running shell keeps reading the old copy.
+    mv "$TMP_DIR/apmw.cmd" "$APP_HOME/apmw.cmd" && mv "$TMP_DIR/apmw" "$APP_HOME/apmw" \
+        || die "cannot replace the apmw scripts in $APP_HOME"
+    cleanup
+    set_props "wrapperVersion=$_ver"
+    info "updated apmw to $_ver - review and commit apmw, apmw.cmd and apm/wrapper/apmw.properties"
+    # Bootstrapping a new project: pin apm as well.
+    if [ -z "$PINNED_VERSION" ]; then
+        upgrade_apm ""
+    fi
+}
+
+show_version() {
+    printf 'apmw %s\n' "$(prop wrapperVersion unknown)"
+    printf 'apm  %s' "${APM_VERSION:-<not configured>}"
+    [ -n "${APMW_APM_VERSION-}" ] && printf ' (from APMW_APM_VERSION)'
+    printf '\n'
+}
+
+show_help() {
+    sed -n '3,/^$/s/^# \{0,1\}//p' "$0"
+}
+
+# --- main ---------------------------------------------------------------------------------
+
+main() {
+    load_settings
+    case ${1-} in
+        --apmw-help) show_help ;;
+        --apmw-version) show_version ;;
+        --apmw-upgrade-apm) upgrade_apm "${2-}" ;;
+        --apmw-upgrade) upgrade_wrapper "${2-}" ;;
+        --apmw-*) die "unknown wrapper option: $1 (see ./apmw --apmw-help)" ;;
+        self-update)
+            die "apm is managed by apmw; use './apmw --apmw-upgrade-apm [VERSION]' to change the pinned version" ;;
+        *)
+            ensure_apm
+            exec "$APM_EXE" "$@"
+            ;;
+    esac
+}
+
+main "$@"
