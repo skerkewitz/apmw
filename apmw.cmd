@@ -211,9 +211,15 @@ function Install-Apm {
             Fail "the downloaded apm does not run on this system (blocked by antivirus or application control?)"
         }
 
-        if (-not (Test-Path -LiteralPath $apmDir)) {
-            try { Move-Item -LiteralPath $staged -Destination $apmDir }
-            catch { if (-not (Test-Path -LiteralPath (Join-Path $apmDir 'apm.exe'))) { Fail "cannot move apm to ${apmDir}: $($_.Exception.Message)" } }
+        # The folder cannot be renamed while a virus scanner still holds the just-run
+        # apm.exe open, so retry for a while.
+        for ($try = 1; -not (Test-Path -LiteralPath $apmDir); $try++) {
+            try { Move-Item -LiteralPath $staged -Destination $apmDir; break }
+            catch {
+                if (Test-Path -LiteralPath (Join-Path $apmDir 'apm.exe')) { break }
+                if ($try -ge 30) { Fail "cannot move apm to ${apmDir}: $($_.Exception.Message)" }
+                Start-Sleep -Seconds 1
+            }
         }
         Info "installed apm $ApmVersion in $apmDir"
     } finally {

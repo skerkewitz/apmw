@@ -76,9 +76,10 @@ prop() {
 set_props() {
     mkdir -p "${PROPS_FILE%/*}" || die "cannot create ${PROPS_FILE%/*}"
     [ -f "$PROPS_FILE" ] || : > "$PROPS_FILE" || die "cannot create $PROPS_FILE"
-    awk -v kv="$1" '
+    # Passed via the environment: macOS awk rejects newlines in -v values.
+    APMW_KV=$1 awk '
         BEGIN {
-            n = split(kv, a, "\n")
+            n = split(ENVIRON["APMW_KV"], a, "\n")
             for (i = 1; i <= n; i++) {
                 j = index(a[i], "="); if (j == 0) continue
                 k = substr(a[i], 1, j - 1); val[k] = substr(a[i], j + 1); order[++m] = k
@@ -276,9 +277,17 @@ install_apm() {
     fi
 
     # Another apmw may have finished the same install meanwhile; keep theirs.
-    if [ ! -d "$APM_DIR" ]; then
-        mv "$_staged" "$APM_DIR" || [ -x "$APM_EXE" ] || die "cannot move apm to $APM_DIR"
-    fi
+    # On Windows the folder cannot be renamed while a virus scanner still holds the
+    # just-run apm.exe open, so retry for a while.
+    _tries=0
+    while [ ! -d "$APM_DIR" ] && ! mv "$_staged" "$APM_DIR" 2>/dev/null; do
+        _tries=$((_tries + 1))
+        if [ "$_tries" -ge 30 ]; then
+            mv "$_staged" "$APM_DIR" || [ -x "$APM_EXE" ] || die "cannot move apm to $APM_DIR"
+            break
+        fi
+        sleep 1
+    done
     cleanup
     info "installed apm $APM_VERSION in $APM_DIR"
 }
