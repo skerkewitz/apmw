@@ -1,5 +1,7 @@
 # apmw
 
+[![test](https://github.com/skerkewitz/apmw/actions/workflows/test.yml/badge.svg)](https://github.com/skerkewitz/apmw/actions/workflows/test.yml)
+
 A wrapper for [Microsoft APM](https://github.com/microsoft/apm) (Agent Package Manager),
 modeled on the Gradle wrapper. Add it to a project once, and everyone who works on the
 project, including CI, runs the same apm version without installing apm first.
@@ -127,14 +129,23 @@ Environment variables override the properties for a single run or in CI:
   same cache as `apmw.cmd` (`%LOCALAPPDATA%\apmw`), so apm is downloaded only once per
   machine.
 
-## Test status
+## Tests
 
-apmw has been tested on Linux (x86_64) and on Windows (x86_64). It has **not** been tested
-on macOS (x86_64 or arm64) or on Windows on ARM yet. The code paths for those platforms
-exist, but we could not try them. Reports and fixes are welcome.
+[tests/test.sh](tests/test.sh) tests both scripts end to end: first run, cache, offline
+behavior, checksums, argument and exit-code passthrough, and self-upgrade. It runs on
+every push on GitHub Actions:
+
+| Runner | Platform |
+|---|---|
+| `ubuntu-latest`, `ubuntu-24.04-arm` | Linux x86_64 and arm64 |
+| `macos-latest`, `macos-15-intel` | macOS arm64 and x86_64 |
+| `windows-latest`, `windows-11-arm` | Windows x64 and ARM (`./apmw` in Git Bash and `apmw.cmd`) |
+
+Run it locally with `tests/test.sh` (on Windows from Git Bash). It needs `curl`,
+`python3` and access to github.com.
 
 ## Releasing apmw
 
-Push a tag such as `v0.1.0`. The workflow in `.github/workflows/release.yml` publishes
-`apmw`, `apmw.cmd` and `apmw.sha256` as release assets, which is what `--apmw-upgrade`
-downloads.
+Push a tag such as `v0.1.0`. The workflow in `.github/workflows/release.yml` runs the
+tests on all platforms first. If they pass, it publishes `apmw`, `apmw.cmd` and
+`apmw.sha256` as release assets, which is what `--apmw-upgrade` downloads.
