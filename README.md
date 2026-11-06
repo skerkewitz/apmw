@@ -16,28 +16,31 @@ through.
 
 ## Adding apmw to a project
 
-On Linux or macOS:
+Download one of the two scripts into the project's root folder and run any apm command.
+
+On Linux, macOS or Git Bash:
 
 ```sh
 curl -fsSLO https://github.com/skerkewitz/apmw/releases/latest/download/apmw
 chmod +x apmw
-./apmw --apmw-upgrade
+./apmw install
 ```
 
-On Windows (PowerShell):
+On Windows (cmd or PowerShell):
 
-```powershell
-Invoke-WebRequest https://github.com/skerkewitz/apmw/releases/latest/download/apmw.cmd -OutFile apmw.cmd
-.\apmw.cmd --apmw-upgrade
+```
+curl -fsSLO https://github.com/skerkewitz/apmw/releases/latest/download/apmw.cmd
+apmw.cmd install
 ```
 
-`--apmw-upgrade` downloads both scripts and creates `apm/wrapper/apmw.properties` with
-the latest apm version and its checksums pinned.
+On the first run in a project, apmw sets up the rest, much like `gradle wrapper`:
 
-You can also skip that step and run any apm command right away, e.g. `./apmw install`.
-If no apm version is pinned yet, apmw pins the latest release in
-`apm/wrapper/apmw.properties` first. That only gives you the script you started with, so
-run `--apmw-upgrade` once to get the other one.
+- It pins the latest apm release and its checksums in `apm/wrapper/apmw.properties`.
+- It adds the other script (`apmw.cmd` or `apmw`) from the same apmw release.
+
+If the second step fails, for example offline, apmw only warns. Run `--apmw-upgrade`
+later to add the missing script. If you delete one of the scripts on purpose, apmw
+doesn't add it back.
 
 Commit these files:
 
@@ -53,6 +56,13 @@ change the line endings and break the scripts:
 ```
 apmw      text eol=lf
 apmw.cmd  text eol=crlf
+```
+
+If you set up the project on Windows, Git doesn't know that `apmw` is executable. Mark it
+once, as you would for `gradlew`:
+
+```sh
+git update-index --chmod=+x apmw
 ```
 
 ## Commands

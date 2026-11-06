@@ -13,13 +13,16 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check scripts
         run: |
           shellcheck apmw
           # .gitattributes must have given apmw.cmd CRLF line endings
           file apmw.cmd | grep -q CRLF
+
+      - name: Stamp release version into the scripts
+        run: scripts/stamp-version.sh "$GITHUB_REF_NAME"
 
       - name: Create release
         env:

@@ -64,6 +64,9 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is very slow with a progress bar
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+# Set to the release tag by the release workflow; 'dev' in a source checkout.
+$ApmwVersion = 'dev'
+
 $DefaultApmReleasesUrl = 'https://github.com/microsoft/apm/releases'
 $DefaultWrapperReleasesUrl = 'https://github.com/skerkewitz/apmw/releases'
 $AllPlatforms = 'linux-x86_64', 'linux-arm64', 'darwin-x86_64', 'darwin-arm64', 'windows-x86_64'
@@ -168,6 +171,7 @@ function Install-Apm {
         $Props = Read-Props
         $PinnedVersion = $Props['apmVersion']
         $ApmVersion = $PinnedVersion
+        Complete-Wrapper
     }
     $verDir = Join-Path $ApmwHome "dists\$ApmVersion"
     $apmDir = Join-Path $verDir $Platform
@@ -246,32 +250,61 @@ function Upgrade-Apm([string]$version) {
     }
 }
 
-function Upgrade-Wrapper([string]$version) {
-    if ($version) { $ver = Normalize-Version $version }
-    else {
-        $ver = Get-LatestTag $WrapperReleasesUrl
-        if (-not $ver) { Fail "cannot determine the latest apmw release from $WrapperReleasesUrl/latest; pass a version" }
-    }
+# Download files of an apmw release, verify them against its apmw.sha256 and move them
+# into the project. Throws on failure.
+function Fetch-WrapperFiles([string]$ver, [string[]]$files) {
     $tmp = New-TempDir $AppHome
     try {
-        Info "downloading apmw $ver ..."
-        foreach ($f in 'apmw', 'apmw.cmd', 'apmw.sha256') {
+        foreach ($f in @('apmw.sha256') + $files) {
             try { Download "$WrapperReleasesUrl/download/$ver/$f" (Join-Path $tmp $f) }
-            catch { Fail "could not download $WrapperReleasesUrl/download/$ver/$f" }
+            catch { throw "could not download $WrapperReleasesUrl/download/$ver/$f" }
         }
         $sums = @{}
         foreach ($line in [IO.File]::ReadAllLines((Join-Path $tmp 'apmw.sha256'))) {
             $parts = $line.Trim() -split '\s+'
             if ($parts.Count -ge 2) { $sums[$parts[1].TrimStart('*')] = $parts[0].ToLowerInvariant() }
         }
-        foreach ($f in 'apmw', 'apmw.cmd') {
-            if ((Get-Sha256 (Join-Path $tmp $f)) -ne $sums[$f]) { Fail "checksum mismatch for $f in apmw $ver" }
+        foreach ($f in $files) {
+            if ((Get-Sha256 (Join-Path $tmp $f)) -ne $sums[$f]) { throw "checksum mismatch for $f in apmw $ver" }
         }
-        Move-Item -LiteralPath (Join-Path $tmp 'apmw') -Destination (Join-Path $AppHome 'apmw') -Force
-        Move-Item -LiteralPath (Join-Path $tmp 'apmw.cmd') -Destination (Join-Path $AppHome 'apmw.cmd') -Force
+        foreach ($f in $files) {
+            Move-Item -LiteralPath (Join-Path $tmp $f) -Destination (Join-Path $AppHome $f) -Force
+        }
     } finally {
         Remove-Dir $tmp
     }
+}
+
+# First run in a project: add the apmw shell script from the same apmw release,
+# like "gradle wrapper" creates both scripts. Never fatal.
+function Complete-Wrapper {
+    $ver = $ApmwVersion
+    if ($ver -eq 'dev') {
+        $ver = Get-LatestTag $WrapperReleasesUrl
+        if (-not $ver) { Info "warning: cannot determine the latest apmw release; run 'apmw --apmw-upgrade' later to add apmw"; return }
+    }
+    if (Test-Path -LiteralPath (Join-Path $AppHome 'apmw')) {
+        Set-Props ([ordered]@{ wrapperVersion = $ver })
+        return
+    }
+    try {
+        Fetch-WrapperFiles $ver @('apmw')
+        Set-Props ([ordered]@{ wrapperVersion = $ver })
+        Info "added apmw ($ver) for Linux, macOS and Git Bash users - commit apmw, apmw.cmd and apm\wrapper\apmw.properties"
+    } catch {
+        Info "warning: could not add apmw ($($_.Exception.Message)); run 'apmw --apmw-upgrade' later"
+    }
+}
+
+function Upgrade-Wrapper([string]$version) {
+    if ($version) { $ver = Normalize-Version $version }
+    else {
+        $ver = Get-LatestTag $WrapperReleasesUrl
+        if (-not $ver) { Fail "cannot determine the latest apmw release from $WrapperReleasesUrl/latest; pass a version" }
+    }
+    Info "downloading apmw $ver ..."
+    try { Fetch-WrapperFiles $ver @('apmw', 'apmw.cmd') }
+    catch { Fail "could not update apmw to ${ver}: $($_.Exception.Message)" }
     Set-Props ([ordered]@{ wrapperVersion = $ver })
     Info "updated apmw to $ver - review and commit apmw, apmw.cmd and apm\wrapper\apmw.properties"
     if (-not $PinnedVersion) { Upgrade-Apm '' }
@@ -310,7 +343,7 @@ try {
             $wv = if ($Props['wrapperVersion']) { $Props['wrapperVersion'] } else { 'unknown' }
             $av = if ($ApmVersion) { $ApmVersion } else { '<not configured>' }
             if ($env:APMW_APM_VERSION) { $av += ' (from APMW_APM_VERSION)' }
-            "apmw $wv"
+            "apmw $wv (this script: $ApmwVersion)"
             "apm  $av"
         }
         '--apmw-upgrade-apm' { Upgrade-Apm $env:APMW_ARG }

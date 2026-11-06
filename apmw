@@ -24,6 +24,9 @@
 # shellcheck disable=SC2015 # "a && b || die" is intended: die if either step fails
 set -u
 
+# Set to the release tag by the release workflow; "dev" in a source checkout.
+APMW_VERSION=dev
+
 DEFAULT_APM_RELEASES_URL=https://github.com/microsoft/apm/releases
 DEFAULT_WRAPPER_RELEASES_URL=https://github.com/skerkewitz/apmw/releases
 ALL_PLATFORMS="linux-x86_64 linux-arm64 darwin-x86_64 darwin-arm64 windows-x86_64"
@@ -204,6 +207,7 @@ ensure_apm() {
         upgrade_apm ""
         PINNED_VERSION=$(prop apmVersion)
         APM_VERSION=$PINNED_VERSION
+        complete_wrapper
     fi
     detect_platform
     APM_DIR=$APMW_HOME/dists/$APM_VERSION/$PLATFORM
@@ -310,6 +314,58 @@ apmSha256.$_p=$_h"
     fi
 }
 
+# fetch_wrapper_files VERSION FILE... - download FILEs of an apmw release, verify them
+# against its apmw.sha256 and move them into the project. Returns 1 on failure.
+fetch_wrapper_files() {
+    _ver=$1
+    shift
+    make_tmp "$APP_HOME"
+    for _f in apmw.sha256 "$@"; do
+        download "$WRAPPER_RELEASES_URL/download/$_ver/$_f" "$TMP_DIR/$_f" || {
+            info "could not download $WRAPPER_RELEASES_URL/download/$_ver/$_f"
+            cleanup
+            return 1
+        }
+    done
+    for _f in "$@"; do
+        _expected=$(lower "$(awk -v f="$_f" '$2 == f || $2 == "*" f { print $1; exit }' "$TMP_DIR/apmw.sha256")")
+        if [ "$(sha256_of "$TMP_DIR/$_f")" != "$_expected" ]; then
+            info "checksum mismatch for $_f in apmw $_ver"
+            cleanup
+            return 1
+        fi
+    done
+    if [ -f "$TMP_DIR/apmw" ]; then
+        head -n 1 "$TMP_DIR/apmw" | grep -q '^#!' || { info "downloaded apmw does not look like a script"; cleanup; return 1; }
+        chmod +x "$TMP_DIR/apmw"
+    fi
+    # mv replaces the files atomically; this running shell keeps reading the old copy.
+    for _f in "$@"; do
+        mv "$TMP_DIR/$_f" "$APP_HOME/$_f" || { info "cannot write $APP_HOME/$_f"; cleanup; return 1; }
+    done
+    cleanup
+}
+
+# complete_wrapper - first run in a project: add apmw.cmd from the same apmw release,
+# like "gradle wrapper" creates both scripts. Never fatal.
+complete_wrapper() {
+    _ver=$APMW_VERSION
+    if [ "$_ver" = dev ]; then
+        _ver=$(latest_tag "$WRAPPER_RELEASES_URL") || {
+            info "warning: cannot determine the latest apmw release; run './apmw --apmw-upgrade' later to add apmw.cmd"
+            return 0
+        }
+    fi
+    if [ -f "$APP_HOME/apmw.cmd" ]; then
+        set_props "wrapperVersion=$_ver"
+    elif fetch_wrapper_files "$_ver" apmw.cmd; then
+        set_props "wrapperVersion=$_ver"
+        info "added apmw.cmd ($_ver) for Windows users - commit apmw, apmw.cmd and apm/wrapper/apmw.properties"
+    else
+        info "warning: could not add apmw.cmd; run './apmw --apmw-upgrade' later"
+    fi
+}
+
 upgrade_wrapper() { # [VERSION]
     need curl
     if [ -n "${1-}" ]; then
@@ -318,22 +374,8 @@ upgrade_wrapper() { # [VERSION]
         _ver=$(latest_tag "$WRAPPER_RELEASES_URL") \
             || die "cannot determine the latest apmw release from $WRAPPER_RELEASES_URL/latest; pass a version"
     fi
-    make_tmp "$APP_HOME"
     info "downloading apmw $_ver ..."
-    for _f in apmw apmw.cmd apmw.sha256; do
-        download "$WRAPPER_RELEASES_URL/download/$_ver/$_f" "$TMP_DIR/$_f" \
-            || die "could not download $WRAPPER_RELEASES_URL/download/$_ver/$_f"
-    done
-    for _f in apmw apmw.cmd; do
-        _expected=$(lower "$(awk -v f="$_f" '$2 == f || $2 == "*" f { print $1; exit }' "$TMP_DIR/apmw.sha256")")
-        [ "$(sha256_of "$TMP_DIR/$_f")" = "$_expected" ] || die "checksum mismatch for $_f in apmw $_ver"
-    done
-    head -n 1 "$TMP_DIR/apmw" | grep -q '^#!' || die "downloaded apmw does not look like a script"
-    chmod +x "$TMP_DIR/apmw"
-    # mv replaces the files atomically; this running shell keeps reading the old copy.
-    mv "$TMP_DIR/apmw.cmd" "$APP_HOME/apmw.cmd" && mv "$TMP_DIR/apmw" "$APP_HOME/apmw" \
-        || die "cannot replace the apmw scripts in $APP_HOME"
-    cleanup
+    fetch_wrapper_files "$_ver" apmw apmw.cmd || die "could not update apmw to $_ver"
     set_props "wrapperVersion=$_ver"
     info "updated apmw to $_ver - review and commit apmw, apmw.cmd and apm/wrapper/apmw.properties"
     # Bootstrapping a new project: pin apm as well.
@@ -343,7 +385,7 @@ upgrade_wrapper() { # [VERSION]
 }
 
 show_version() {
-    printf 'apmw %s\n' "$(prop wrapperVersion unknown)"
+    printf 'apmw %s (this script: %s)\n' "$(prop wrapperVersion unknown)" "$APMW_VERSION"
     printf 'apm  %s' "${APM_VERSION:-<not configured>}"
     [ -n "${APMW_APM_VERSION-}" ] && printf ' (from APMW_APM_VERSION)'
     printf '\n'
