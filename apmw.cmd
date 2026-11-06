@@ -50,8 +50,9 @@ exit /b 0
 
 :wrapper_command
 rem Kept on one line: --apmw-upgrade replaces this file while it runs, and cmd
-rem reads a batch file line by line.
-set "APMW_ARG=%~2" & %APMW_PS% & exit /b
+rem reads a batch file line by line. The exit codes must be explicit: a bare
+rem "exit /b" returns 0 when the file was started with "cmd /c".
+set "APMW_ARG=%~2" & (%APMW_PS% && exit /b 0 || exit /b 1)
 
 #apmw-powershell
 # ---------------------------------------------------------------------------------

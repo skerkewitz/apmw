@@ -1,0 +1,42 @@
+# Runs the apmw test suite on every supported platform.
+# Also called by release.yml, so a release is only published when all tests pass.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        run: shellcheck apmw scripts/*.sh tests/*.sh
+      - name: apmw.cmd has CRLF line endings
+        run: file apmw.cmd | grep -q CRLF
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest       # linux-x86_64
+          - ubuntu-24.04-arm    # linux-arm64
+          - macos-latest        # darwin-arm64
+          - macos-15-intel      # darwin-x86_64
+          - windows-latest      # windows-x86_64: ./apmw in Git Bash and apmw.cmd
+          - windows-11-arm      # Windows on ARM: x86_64 apm under emulation
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run tests
+        shell: bash
+        run: tests/test.sh
